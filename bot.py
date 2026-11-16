@@ -23,218 +23,136 @@ from aiogram.types import (
 # НАСТРОЙКИ
 # =========================================================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-if not BOT_TOKEN:
-    raise SystemExit(
-        "❌ Переменная окружения BOT_TOKEN не задана.\n"
-        "Установите её: Railway → Variables → BOT_TOKEN"
-    )
+ADMIN_ID_STR = os.getenv("ADMIN_ID")
 
-BACK_TEXT = "⬅️ Назад"  # Текст кнопки возврата
+if not BOT_TOKEN:
+    raise SystemExit("❌ Переменная BOT_TOKEN не задана.")
+
+try:
+    ADMIN_ID = int(ADMIN_ID_STR) if ADMIN_ID_STR else None
+except ValueError:
+    ADMIN_ID = None
+
+BACK_TEXT = "⬅️ Назад"
 
 # =========================================================
-# ХЕЛПЕРЫ ПАРСИНГА
+# ХЕЛПЕРЫ
 # =========================================================
 def parse_float(text: str):
-    if text is None:
-        return None
-    s = text.strip().replace("\u00a0", "").replace(" ", "")
-    s = s.replace(",", ".").replace("₽", "").replace("%", "")
-    if not s:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
+    if text is None: return None
+    s = text.strip().replace("\u00a0", "").replace(" ", "").replace(",", ".").replace("₽", "").replace("%", "")
+    if not s: return None
+    try: return float(s)
+    except ValueError: return None
 
 def parse_scores(text: str):
     parts = re.split(r"[,;\s]+", text.strip())
     result = []
     for p in parts:
-        if not p:
-            continue
-        try:
-            v = float(p.replace(",", "."))
-        except ValueError:
-            return None
-        if v < 0:
-            return None
+        if not p: continue
+        try: v = float(p.replace(",", "."))
+        except ValueError: return None
+        if v < 0: return None
         result.append(v)
     return result
 
+# Уведомление админа
+async def notify_admin(text: str):
+    if ADMIN_ID:
+        try:
+            await bot.send_message(ADMIN_ID, text, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            print(f"Не удалось отправить уведомление админу: {e}")
 
 # =========================================================
-# КОЭФФИЦИЕНТЫ
+# КОЭФФИЦИЕНТЫ И РАСЧЕТЫ
 # =========================================================
-def eff_coef(percent: float) -> float:
-    if percent < 60: return 0.0
-    if percent < 65: return 0.3
-    if percent < 70: return 0.7
-    if percent < 80: return 1.0
+def eff_coef(p: float) -> float:
+    if p < 60: return 0.0
+    if p < 65: return 0.3
+    if p < 70: return 0.7
+    if p < 80: return 1.0
     return 1.1
 
-def calls_coef(score: float) -> float:
-    if score < 60: return 0.0
-    if score < 75: return 0.3
-    if score < 95: return 0.7
-    if score < 100: return 1.0
+def calls_coef(s: float) -> float:
+    if s < 60: return 0.0
+    if s < 75: return 0.3
+    if s < 95: return 0.7
+    if s < 100: return 1.0
     return 1.1
 
-def chats_coef(score: float) -> float:
-    if score < 75: return 0.0
-    if score < 90: return 0.3
-    if score < 95: return 0.7
-    if score < 100: return 1.0
+def chats_coef(s: float) -> float:
+    if s < 75: return 0.0
+    if s < 90: return 0.3
+    if s < 95: return 0.7
+    if s < 100: return 1.0
     return 1.1
 
-
-# =========================================================
-# РАСЧЁТ КАЧЕСТВА
-# =========================================================
 def calc_quality(calls, chats) -> dict:
     n_calls, n_chats = len(calls), len(chats)
     total = n_calls + n_chats
-
     if total == 0:
-        return {
-            "n_calls": 0, "n_chats": 0, "avg_calls": None, "avg_chats": None,
-            "k_calls": 0.0, "k_chats": 0.0, "share_calls": 0.0, "share_chats": 0.0,
-            "contrib_calls": 0.0, "contrib_chats": 0.0, "kpi": 1.0,
-        }
-
+        return {"n_calls": 0, "n_chats": 0, "avg_calls": None, "avg_chats": None, "k_calls": 0.0, "k_chats": 0.0, "share_calls": 0.0, "share_chats": 0.0, "contrib_calls": 0.0, "contrib_chats": 0.0, "kpi": 1.0}
     avg_calls = (sum(calls) / n_calls) if n_calls else None
     avg_chats = (sum(chats) / n_chats) if n_chats else None
     k_calls = calls_coef(avg_calls) if n_calls else 0.0
     k_chats = chats_coef(avg_chats) if n_chats else 0.0
     share_calls = n_calls / total
     share_chats = n_chats / total
+    return {"n_calls": n_calls, "n_chats": n_chats, "avg_calls": avg_calls, "avg_chats": avg_chats, "k_calls": k_calls, "k_chats": k_chats, "share_calls": share_calls, "share_chats": share_chats, "contrib_calls": share_calls * k_calls, "contrib_chats": share_chats * k_chats, "kpi": (share_calls * k_calls) + (share_chats * k_chats)}
 
-    return {
-        "n_calls": n_calls, "n_chats": n_chats, "avg_calls": avg_calls, "avg_chats": avg_chats,
-        "k_calls": k_calls, "k_chats": k_chats, "share_calls": share_calls, "share_chats": share_chats,
-        "contrib_calls": share_calls * k_calls, "contrib_chats": share_chats * k_chats,
-        "kpi": (share_calls * k_calls) + (share_chats * k_chats),
-    }
-
-
-# =========================================================
-# РАСЧЁТ ОВЕРТАЙМОВ
-# =========================================================
 def calc_overtime(hours: float) -> float:
-    """Считает оплату за овертаймы: первые 15 часов по 700, остальные по 800."""
-    if hours <= 0:
-        return 0.0
-    if hours <= 15:
-        return hours * 700
+    if hours <= 0: return 0.0
+    if hours <= 15: return hours * 700
     return (15 * 700) + ((hours - 15) * 800)
 
-
-# =========================================================
-# ФОРМАТИРОВАНИЕ
-# =========================================================
-def fmt2(v: float) -> str:
-    return f"{v:.2f}"
-
-def fmt_money(v: float) -> str:
-    return f"{v:,.0f}".replace(",", " ") + " ₽"
+def fmt2(v: float) -> str: return f"{v:.2f}"
+def fmt_money(v: float) -> str: return f"{v:,.0f}".replace(",", " ") + " ₽"
 
 def build_result_text(d: dict) -> str:
-    eff_total = d["eff_total"]
-    eff_target = d["eff_target"]
+    eff_total, eff_target = d["eff_total"], d["eff_target"]
     dtk = (eff_target / eff_total * 100) if eff_total > 0 else 0.0
     k_eff = eff_coef(dtk)
     q = calc_quality(d.get("calls", []), d.get("chats", []))
     
-    spo = d["spo"]
-    conv = d["conv"]
+    spo, conv = d["spo"], d["conv"]
     kpi = 0.5 * q["kpi"] + 0.5 * k_eff - spo + conv
-
-    disc = d["discipline"]
-    rate = d["rate"]
-    offers = d["offers"]
-    hw = d["hours_worked"]
-    hp = d["hours_planned"]
-    ot_hours = d.get("overtime_hours", 0)
+    disc, rate, offers = d["discipline"], d["rate"], d["offers"]
+    hw, hp, ot_hours = d["hours_worked"], d["hours_planned"], d.get("overtime_hours", 0)
     
     vyrabotka = (hw / hp) if hp > 0 else 0.0
     base_bonus = rate * vyrabotka * kpi * disc
     ot_pay = calc_overtime(ot_hours)
-    
     total_payout = base_bonus + offers + ot_pay
 
-    calls_line = f"• Звонки: {q['n_calls']} оц., ср. {fmt2(q['avg_calls'])} → коэф {fmt2(q['k_calls'])} (доля {fmt2(q['share_calls'])}, вклад {fmt2(q['contrib_calls'])})" if q["n_calls"] else "• Звонки: нет оценок (коэф 0.00)"
-    chats_line = f"• Чаты: {q['n_chats']} оц., ср. {fmt2(q['avg_chats'])} → коэф {fmt2(q['k_chats'])} (доля {fmt2(q['share_chats'])}, вклад {fmt2(q['contrib_chats'])})" if q["n_chats"] else "• Чаты: нет оценок (коэф 0.00)"
+    calls_line = f"• Звонки: {q['n_calls']} оц., ср. {fmt2(q['avg_calls'])} → коэф {fmt2(q['k_calls'])}" if q["n_calls"] else "• Звонки: нет оценок"
+    chats_line = f"• Чаты: {q['n_chats']} оц., ср. {fmt2(q['avg_chats'])} → коэф {fmt2(q['k_chats'])}" if q["n_chats"] else "• Чаты: нет оценок"
 
     return (
-        "✅ <b>Результат расчёта</b>\n\n"
-        "<b>1️⃣ К-Эффективности</b>\n"
-        f"• Всего коммуникаций: {eff_total:.0f}\n"
-        f"• В таргете: {eff_target:.0f}\n"
-        f"• ДТК: {dtk:.1f}%\n"
-        f"• К-эффективности: <b>{fmt2(k_eff)}</b>\n\n"
-        "<b>2️⃣ К-Качества</b>\n"
-        f"{calls_line}\n{chats_line}\n"
-        f"• К-качества: <b>{fmt2(q['kpi'])}</b>\n\n"
-        "<b>3️⃣ Итоговый KPI</b>\n"
-        f"(0.5 × {fmt2(q['kpi'])}) + (0.5 × {fmt2(k_eff)}) − {fmt2(spo)} + {fmt2(conv)} = <b>{fmt2(kpi)}</b>\n\n"
-        "<b>4️⃣ Финансы</b>\n"
-        f"• Выработка: {hw:.0f} / {hp:.0f} = {fmt2(vyrabotka)}\n"
-        f"• Базовая премия: ({rate:.0f} × {fmt2(vyrabotka)} × {fmt2(kpi)} × {fmt2(disc)}) = {fmt_money(base_bonus)}\n"
-        f"• Сумма за офферы: {fmt_money(offers)}\n"
-        f"• Овертаймы ({ot_hours:.1f} ч.): {fmt_money(ot_pay)}\n"
-        f"<b>💰 ИТОГО К ВЫПЛАТЕ: {fmt_money(total_payout)}</b>"
+        f"✅ <b>Результат расчёта</b>\n\n"
+        f"<b>1️⃣ К-Эффективности</b>\n• ДТК: {dtk:.1f}%\n• Коэф: <b>{fmt2(k_eff)}</b>\n\n"
+        f"<b>2️⃣ К-Качества</b>\n{calls_line}\n{chats_line}\n• Коэф: <b>{fmt2(q['kpi'])}</b>\n\n"
+        f"<b>3️⃣ Итоговый KPI</b>\n<b>{fmt2(kpi)}</b>\n\n"
+        f"<b>4️⃣ Финансы</b>\n"
+        f"• Базовая премия: {fmt_money(base_bonus)}\n"
+        f"• Офферы: {fmt_money(offers)}\n"
+        f"• Овертаймы: {fmt_money(ot_pay)}\n"
+        f"<b>💰 ИТОГО: {fmt_money(total_payout)}</b>"
     )
 
-
 # =========================================================
-# FSM (Состояния)
+# FSM И КЛАВИАТУРЫ
 # =========================================================
 class Calc(StatesGroup):
-    eff_total = State()
-    eff_target = State()
-    calls = State()
-    chats = State()
-    spo = State()
-    conv = State()
-    discipline = State()
-    rate = State()
-    offers = State()
-    hours_worked = State()
-    hours_planned = State()
-    overtime_hours = State()  # Новое состояние для овертаймов
+    eff_total = State(); eff_target = State(); calls = State(); chats = State()
+    spo = State(); conv = State(); discipline = State(); rate = State()
+    offers = State(); hours_worked = State(); hours_planned = State(); overtime_hours = State()
 
-
-# =========================================================
-# КЛАВИАТУРЫ
-# =========================================================
-def kb_back():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=BACK_TEXT)]],
-        resize_keyboard=True,
-    )
-
-def kb_no_scores():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="Нет оценок")], [KeyboardButton(text=BACK_TEXT)]],
-        resize_keyboard=True,
-    )
-
-def kb_skip(value: str):
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text=f"Пропустить ({value})")], [KeyboardButton(text=BACK_TEXT)]],
-        resize_keyboard=True,
-    )
-
-def kb_result():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Новый расчёт", callback_data="start_calc")]
-    ])
-
-def kb_start():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚀 Начать расчёт", callback_data="start_calc")]
-    ])
-
+def kb_back(): return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=BACK_TEXT)]], resize_keyboard=True)
+def kb_no_scores(): return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Нет оценок")], [KeyboardButton(text=BACK_TEXT)]], resize_keyboard=True)
+def kb_skip(val: str): return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=f"Пропустить ({val})")], [KeyboardButton(text=BACK_TEXT)]], resize_keyboard=True)
+def kb_result(): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔄 Новый расчёт", callback_data="start_calc")]])
+def kb_start(): return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🚀 Начать расчёт", callback_data="start_calc")]])
 
 # =========================================================
 # BOT + DISPATCHER
@@ -242,17 +160,26 @@ def kb_start():
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-
 # =========================================================
-# КОМАНДЫ
+# КОМАНДЫ И УВЕДОМЛЕНИЯ
 # =========================================================
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
+    
+    # УВЕДОМЛЕНИЕ АДМИНУ О НОВОМ ПОЛЬЗОВАТЕЛЕ
+    user = message.from_user
+    username = f"@{user.username}" if user.username else "нет username"
+    await notify_admin(
+        f"👤 <b>Кто-то запустил бота!</b>\n"
+        f"Имя: {user.full_name}\n"
+        f"Логин: {username}\n"
+        f"ID: <code>{user.id}</code>"
+    )
+    
     await message.answer(
         "👋 Привет! Это калькулятор мотивации.\n\n"
-        "Я рассчитаю:\n1️⃣ К-Эффективности (таргет)\n2️⃣ К-Качества (оценки)\n"
-        "3️⃣ Итоговый KPI\n4️⃣ Премию и овертаймы\n\nНажми кнопку ниже, чтобы начать.",
+        "Я рассчитаю KPI и премию.\nНажми кнопку ниже.",
         reply_markup=ReplyKeyboardRemove(),
     )
     await message.answer("Готов?", reply_markup=kb_start())
@@ -264,292 +191,177 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    await message.answer(
-        "ℹ️ <b>Как пользоваться</b>\n\n"
-        "1. /start — запустить расчёт.\n"
-        "2. Вводи значения по шагам.\n"
-        "3. Оценки вводятся через запятую: <code>100, 80, 90</code>\n"
-        "4. Если ошиблись — нажми кнопку <b>⬅️ Назад</b>.\n"
-        "5. Для полей по умолчанию — «Пропустить»."
-    )
-
+    await message.answer("ℹ️ Вводи значения по шагам. Оценки пиши через запятую.\nКнопка «Назад» поможет исправить ошибку.")
 
 # =========================================================
-# СТАРТ И ШАГИ
+# ШАГИ
 # =========================================================
 @dp.callback_query(F.data == "start_calc")
 async def cb_start_calc(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
     await state.clear()
     await state.set_state(Calc.eff_total)
-    await callback.message.answer(
-        "📊 <b>Шаг 1/12.</b> Сколько всего было коммуникаций?\nНапример: <code>480</code>",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await callback.message.answer("📊 <b>Шаг 1/12.</b> Всего коммуникаций?\nНапример: <code>480</code>", reply_markup=ReplyKeyboardRemove())
 
-# --- ШАГ 1: Всего ---
 @dp.message(Calc.eff_total, F.text)
 async def step_eff_total(message: Message, state: FSMContext):
-    if message.text.strip() == BACK_TEXT:
-        await message.answer("Это первый шаг. Нажмите /start, чтобы выйти в меню.", reply_markup=ReplyKeyboardRemove())
-        return
-    
+    if message.text.strip() == BACK_TEXT: return await message.answer("Это первый шаг.", reply_markup=ReplyKeyboardRemove())
     val = parse_float(message.text)
-    if val is None or val < 0:
-        await message.answer("⚠️ Введи неотрицательное число. Например: 480")
-        return
-    
+    if val is None or val < 0: return await message.answer("⚠️ Введи число.")
     await state.update_data(eff_total=val)
     await state.set_state(Calc.eff_target)
-    await message.answer(
-        "🎯 <b>Шаг 2/12.</b> Сколько попало в таргет?\nНапример: <code>390</code>",
-        reply_markup=kb_back()
-    )
+    await message.answer("🎯 <b>Шаг 2/12.</b> Попало в таргет?\nНапример: <code>390</code>", reply_markup=kb_back())
 
-# --- ШАГ 2: Таргет ---
 @dp.message(Calc.eff_target, F.text)
 async def step_eff_target(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.eff_total)
-        await message.answer("📊 <b>Шаг 1/12.</b> Сколько всего было коммуникаций?\nНапример: <code>480</code>", reply_markup=ReplyKeyboardRemove())
-        return
-
+        return await message.answer("📊 <b>Шаг 1/12.</b> Всего коммуникаций?", reply_markup=ReplyKeyboardRemove())
     val = parse_float(message.text)
     data = await state.get_data()
-    total = data.get("eff_total", 0)
-
-    if val is None or val < 0:
-        await message.answer("⚠️ Введи неотрицательное число. Например: 390")
-        return
-    if val > total:
-        await message.answer(f"⚠️ В таргет не может попасть больше, чем всего коммуникаций ({total:.0f}).")
-        return
-
-    dtk = (val / total * 100) if total > 0 else 0.0
-    k_eff = eff_coef(dtk)
-
+    if val is None or val < 0: return await message.answer("⚠️ Введи число.")
+    if val > data.get("eff_total", 0): return await message.answer("⚠️ Таргет не может быть больше общего числа.")
     await state.update_data(eff_target=val)
     await state.set_state(Calc.calls)
-    await message.answer(
-        f"📈 ДТК: <b>{dtk:.1f}%</b> → К-эффективности: <b>{fmt2(k_eff)}</b>\n\n"
-        "⭐ <b>Шаг 3/12.</b> Оценки за <b>звонки</b> (через запятую).\nПример: <code>100, 80</code>\n"
-        "Если оценок нет — нажми «Нет оценок».",
-        reply_markup=kb_no_scores(),
-    )
+    await message.answer("⭐ <b>Шаг 3/12.</b> Оценки за <b>звонки</b> через запятую.\nПример: <code>100, 80</code>", reply_markup=kb_no_scores())
 
-# --- ШАГ 3: Звонки ---
 @dp.message(Calc.calls, F.text)
 async def step_calls(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.eff_target)
-        data = await state.get_data()
-        await message.answer(f"🎯 <b>Шаг 2/12.</b> Сколько попало в таргет?\n(Всего было: {data.get('eff_total', 0):.0f})", reply_markup=kb_back())
-        return
-
+        return await message.answer("🎯 <b>Шаг 2/12.</b> Попало в таргет?", reply_markup=kb_back())
     text = message.text.strip()
-    if text.lower().startswith("нет оценок"):
-        scores = []
-    else:
-        scores = parse_scores(text)
-        if scores is None or len(scores) == 0:
-            await message.answer("⚠️ Не смог разобрать оценки. Введи числа через запятую, например: <code>100, 80, 90</code>")
-            return
-
+    scores = [] if text.lower().startswith("нет оценок") else parse_scores(text)
+    if scores is None: return await message.answer("⚠️ Ошибка ввода. Введи числа через запятую.")
     await state.update_data(calls=scores)
     await state.set_state(Calc.chats)
-    await message.answer(
-        "💬 <b>Шаг 4/12.</b> Оценки за <b>чаты</b> (через запятую).\nПример: <code>100, 0, 50</code>\n"
-        "Если оценок нет — нажми «Нет оценок».",
-        reply_markup=kb_no_scores(),
-    )
+    await message.answer("💬 <b>Шаг 4/12.</b> Оценки за <b>чаты</b> через запятую.\nПример: <code>100, 0, 50</code>", reply_markup=kb_no_scores())
 
-# --- ШАГ 4: Чаты ---
 @dp.message(Calc.chats, F.text)
 async def step_chats(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.calls)
-        await message.answer("⭐ <b>Шаг 3/12.</b> Оценки за <b>звонки</b> (через запятую).\nЕсли оценок нет — нажми «Нет оценок».", reply_markup=kb_no_scores())
-        return
-
+        return await message.answer("⭐ <b>Шаг 3/12.</b> Оценки за <b>звонки</b>:", reply_markup=kb_no_scores())
     text = message.text.strip()
-    if text.lower().startswith("нет оценок"):
-        scores = []
-    else:
-        scores = parse_scores(text)
-        if scores is None or len(scores) == 0:
-            await message.answer("⚠️ Не смог разобрать оценки. Введи числа через запятую, например: <code>100, 80, 90</code>")
-            return
-
+    scores = [] if text.lower().startswith("нет оценок") else parse_scores(text)
+    if scores is None: return await message.answer("⚠️ Ошибка ввода. Введи числа.")
     await state.update_data(chats=scores)
     await state.set_state(Calc.spo)
-    data = await state.get_data()
-    q = calc_quality(data.get("calls", []), data.get("chats", []))
+    await message.answer("➖ <b>Шаг 5/12.</b> СПО / Постзвонок?\nЕсли 0 — «Пропустить».", reply_markup=kb_skip("0"))
 
-    await message.answer(
-        f"📊 Промежуточный К-качества: <b>{fmt2(q['kpi'])}</b>\n\n"
-        "➖ <b>Шаг 5/12.</b> СПО / Постзвонок (число).\nЕсли 0 — нажми «Пропустить».",
-        reply_markup=kb_skip("0"),
-    )
-
-# --- ШАГ 5: СПО ---
 @dp.message(Calc.spo, F.text)
 async def step_spo(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.chats)
-        await message.answer("💬 <b>Шаг 4/12.</b> Оценки за <b>чаты</b> (через запятую).\nЕсли оценок нет — нажми «Нет оценок».", reply_markup=kb_no_scores())
-        return
-
-    text = message.text.strip()
-    val = 0.0 if text.startswith("Пропустить") else parse_float(text)
-    if val is None:
-        await message.answer("⚠️ Введи число или нажми «Пропустить (0)».")
-        return
-
+        return await message.answer("💬 <b>Шаг 4/12.</b> Оценки за <b>чаты</b>:", reply_markup=kb_no_scores())
+    val = 0.0 if message.text.strip().startswith("Пропустить") else parse_float(message.text)
+    if val is None: return await message.answer("⚠️ Введи число.")
     await state.update_data(spo=val)
     await state.set_state(Calc.conv)
-    await message.answer("🔁 <b>Шаг 6/12.</b> Конверсия (число).\nЕсли 0 — нажми «Пропустить».", reply_markup=kb_skip("0"))
+    await message.answer("🔁 <b>Шаг 6/12.</b> Конверсия?\nЕсли 0 — «Пропустить».", reply_markup=kb_skip("0"))
 
-# --- ШАГ 6: Конверсия ---
 @dp.message(Calc.conv, F.text)
 async def step_conv(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.spo)
-        await message.answer("➖ <b>Шаг 5/12.</b> СПО / Постзвонок (число).\nЕсли 0 — нажми «Пропустить».", reply_markup=kb_skip("0"))
-        return
-
-    text = message.text.strip()
-    val = 0.0 if text.startswith("Пропустить") else parse_float(text)
-    if val is None:
-        await message.answer("⚠️ Введи число или нажми «Пропустить (0)».")
-        return
-
+        return await message.answer("➖ <b>Шаг 5/12.</b> СПО?", reply_markup=kb_skip("0"))
+    val = 0.0 if message.text.strip().startswith("Пропустить") else parse_float(message.text)
+    if val is None: return await message.answer("⚠️ Введи число.")
     await state.update_data(conv=val)
     await state.set_state(Calc.discipline)
-    await message.answer("📋 <b>Шаг 7/12.</b> Дисциплина (коэффициент).\nПо умолчанию <code>1</code>.", reply_markup=kb_skip("1"))
+    await message.answer("📋 <b>Шаг 7/12.</b> Дисциплина (коэф).\nПо умолчанию <code>1</code>.", reply_markup=kb_skip("1"))
 
-# --- ШАГ 7: Дисциплина ---
 @dp.message(Calc.discipline, F.text)
 async def step_discipline(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.conv)
-        await message.answer("🔁 <b>Шаг 6/12.</b> Конверсия (число).\nЕсли 0 — нажми «Пропустить».", reply_markup=kb_skip("0"))
-        return
-
-    text = message.text.strip()
-    val = 1.0 if text.startswith("Пропустить") else parse_float(text)
-    if val is None or val < 0:
-        await message.answer("⚠️ Введи неотрицательное число или нажми «Пропустить (1)».")
-        return
-
+        return await message.answer("🔁 <b>Шаг 6/12.</b> Конверсия?", reply_markup=kb_skip("0"))
+    val = 1.0 if message.text.strip().startswith("Пропустить") else parse_float(message.text)
+    if val is None: return await message.answer("⚠️ Введи число.")
     await state.update_data(discipline=val)
     await state.set_state(Calc.rate)
-    await message.answer("💵 <b>Шаг 8/12.</b> Ставка премии в ₽ (например <code>10000</code>).", reply_markup=kb_back())
+    await message.answer("💵 <b>Шаг 8/12.</b> Ставка премии (₽).\nНапример: <code>10000</code>", reply_markup=kb_back())
 
-# --- ШАГ 8: Ставка ---
 @dp.message(Calc.rate, F.text)
 async def step_rate(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.discipline)
-        await message.answer("📋 <b>Шаг 7/12.</b> Дисциплина (коэффициент).\nПо умолчанию <code>1</code>.", reply_markup=kb_skip("1"))
-        return
-
+        return await message.answer("📋 <b>Шаг 7/12.</b> Дисциплина:", reply_markup=kb_skip("1"))
     val = parse_float(message.text)
-    if val is None or val < 0:
-        await message.answer("⚠️ Введи неотрицательное число. Например: 10000")
-        return
-
+    if val is None: return await message.answer("⚠️ Введи число.")
     await state.update_data(rate=val)
     await state.set_state(Calc.offers)
-    await message.answer("🎁 <b>Шаг 9/12.</b> Сумма за офферы в ₽.\nЕсли 0 — нажми «Пропустить».", reply_markup=kb_skip("0"))
+    await message.answer("🎁 <b>Шаг 9/12.</b> Сумма за офферы (₽).\nЕсли 0 — «Пропустить».", reply_markup=kb_skip("0"))
 
-# --- ШАГ 9: Офферы ---
 @dp.message(Calc.offers, F.text)
 async def step_offers(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.rate)
-        await message.answer("💵 <b>Шаг 8/12.</b> Ставка премии в ₽ (например <code>10000</code>).", reply_markup=kb_back())
-        return
-
-    text = message.text.strip()
-    val = 0.0 if text.startswith("Пропустить") else parse_float(text)
-    if val is None or val < 0:
-        await message.answer("⚠️ Введи неотрицательное число или нажми «Пропустить (0)».")
-        return
-
+        return await message.answer("💵 <b>Шаг 8/12.</b> Ставка премии:", reply_markup=kb_back())
+    val = 0.0 if message.text.strip().startswith("Пропустить") else parse_float(message.text)
+    if val is None: return await message.answer("⚠️ Введи число.")
     await state.update_data(offers=val)
     await state.set_state(Calc.hours_worked)
-    await message.answer("⏱ <b>Шаг 10/12.</b> Отработано часов (например <code>160</code>).", reply_markup=kb_back())
+    await message.answer("⏱ <b>Шаг 10/12.</b> Отработано часов.", reply_markup=kb_back())
 
-# --- ШАГ 10: Отработано часов ---
 @dp.message(Calc.hours_worked, F.text)
 async def step_hours_worked(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.offers)
-        await message.answer("🎁 <b>Шаг 9/12.</b> Сумма за офферы в ₽.\nЕсли 0 — нажми «Пропустить».", reply_markup=kb_skip("0"))
-        return
-
+        return await message.answer("🎁 <b>Шаг 9/12.</b> Сумма за офферы:", reply_markup=kb_skip("0"))
     val = parse_float(message.text)
-    if val is None or val < 0:
-        await message.answer("⚠️ Введи неотрицательное число. Например: 160")
-        return
-
+    if val is None: return await message.answer("⚠️ Введи число.")
     await state.update_data(hours_worked=val)
     await state.set_state(Calc.hours_planned)
-    await message.answer("📅 <b>Шаг 11/12.</b> Запланировано часов (например <code>160</code>).", reply_markup=kb_back())
+    await message.answer("📅 <b>Шаг 11/12.</b> Запланировано часов.", reply_markup=kb_back())
 
-# --- ШАГ 11: Запланировано часов ---
 @dp.message(Calc.hours_planned, F.text)
 async def step_hours_planned(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.hours_worked)
-        await message.answer("⏱ <b>Шаг 10/12.</b> Отработано часов (например <code>160</code>).", reply_markup=kb_back())
-        return
-
+        return await message.answer("⏱ <b>Шаг 10/12.</b> Отработано часов:", reply_markup=kb_back())
     val = parse_float(message.text)
-    if val is None or val <= 0:
-        await message.answer("⚠️ Введи положительное число. Например: 160")
-        return
-
+    if val is None or val <= 0: return await message.answer("⚠️ Введи число больше нуля.")
     await state.update_data(hours_planned=val)
     await state.set_state(Calc.overtime_hours)
-    await message.answer(
-        "🔥 <b>Шаг 12/12.</b> Сколько часов <b>овертайма</b>?\n"
-        "*(Первые 15 ч. по 700 ₽, далее по 800 ₽)*\n"
-        "Если овертаймов не было — нажми «Пропустить».",
-        reply_markup=kb_skip("0")
-    )
+    await message.answer("🔥 <b>Шаг 12/12.</b> Часы овертайма.\n*(1-15 ч. по 700₽, далее по 800₽)*", reply_markup=kb_skip("0"))
 
-# --- ШАГ 12: Овертаймы (Финал) ---
 @dp.message(Calc.overtime_hours, F.text)
 async def step_overtime_hours(message: Message, state: FSMContext):
     if message.text.strip() == BACK_TEXT:
         await state.set_state(Calc.hours_planned)
-        await message.answer("📅 <b>Шаг 11/12.</b> Запланировано часов (например <code>160</code>).", reply_markup=kb_back())
-        return
-
-    text = message.text.strip()
-    val = 0.0 if text.startswith("Пропустить") else parse_float(text)
-    if val is None or val < 0:
-        await message.answer("⚠️ Введи неотрицательное число или нажми «Пропустить (0)».")
-        return
-
+        return await message.answer("📅 <b>Шаг 11/12.</b> Запланировано часов:", reply_markup=kb_back())
+    
+    val = 0.0 if message.text.strip().startswith("Пропустить") else parse_float(message.text)
+    if val is None: return await message.answer("⚠️ Введи число.")
+    
     await state.update_data(overtime_hours=val)
     data = await state.get_data()
     await state.clear()
 
+    result_text = build_result_text(data)
     await message.answer("✅ Готово! Считаю...", reply_markup=ReplyKeyboardRemove())
-    await message.answer(build_result_text(data), reply_markup=kb_result())
+    await message.answer(result_text, reply_markup=kb_result())
 
+    # УВЕДОМЛЕНИЕ АДМИНУ О РАСЧЕТЕ
+    user = message.from_user
+    username = f"@{user.username}" if user.username else user.full_name
+    
+    # Вытаскиваем итоговую сумму для админа
+    ot_pay = calc_overtime(val)
+    await notify_admin(
+        f"📊 <b>Пользователь сделал расчёт!</b>\n"
+        f"Кто: {username} (ID: <code>{user.id}</code>)\n"
+        f"Овертайм: {val} ч.\n\n"
+        f"{result_text}"
+    )
 
 # =========================================================
 # FALLBACK И ЗАПУСК
 # =========================================================
 @dp.message()
 async def fallback(message: Message):
-    await message.answer(
-        "Нажми /start, чтобы начать расчёт, или /help для справки.",
-        reply_markup=ReplyKeyboardRemove(),
-    )
+    await message.answer("Нажми /start, чтобы начать расчёт, или /help.")
 
 async def main():
     print("Бот запущен...")
